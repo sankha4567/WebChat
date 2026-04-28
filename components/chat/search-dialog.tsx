@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Search, X, MessageSquare, User } from "lucide-react";
@@ -26,11 +26,13 @@ export function SearchDialog({ open, onOpenChange }: SearchDialogProps) {
     query.length > 0 ? { searchQuery: query } : "skip"
   );
 
-  useEffect(() => {
-    if (!open) {
-      setQuery("");
-    }
-  }, [open]);
+  // Reset state in render rather than an effect (React 19 idiom): when the
+  // parent flips `open` we drain the search box without an extra render.
+  const [prevOpen, setPrevOpen] = useState(open);
+  if (open !== prevOpen) {
+    setPrevOpen(open);
+    if (!open) setQuery("");
+  }
 
   if (!open) return null;
 

@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query, internalMutation } from "./_generated/server";
+import { getOptionalUser, requireUser } from "./utils";
 
 // Create or update user from Clerk webhook
 export const upsertUser = internalMutation({
@@ -55,15 +56,7 @@ export const deleteUser = internalMutation({
 export const getCurrentUser = query({
   args: {},
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return null;
-
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
-      .unique();
-
-    return user;
+    return await getOptionalUser(ctx);
   },
 });
 
@@ -79,69 +72,65 @@ export const getUser = query({
 export const searchUsers = query({
   args: { searchQuery: v.string() },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return [];
-
-    const currentUser = await ctx.db
-      .query("users")
-      .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
-      .unique();
-
+    const currentUser = await getOptionalUser(ctx);
     if (!currentUser) return [];
 
-    if (args.searchQuery.trim() === "") {
-      const users = await ctx.db.query("users").collect();
-      return users.filter((u) => u._id !== currentUser._id).slice(0, 20);
+    const trimmed = args.searchQuery.trim();
+
+    // Empty query: return a small recent slice instead of scanning the whole table.
+    if (trimmed === "") {
+      const users = await ctx.db.query("users").take(20);
+      return users.filter((u) => u._id !== currentUser._id);
     }
 
     const results = await ctx.db
       .query("users")
-      .withSearchIndex("search_users", (q) =>
-        q.search("username", args.searchQuery)
-      )
-      .collect();
+      .withSearchIndex("search_users", (q) => q.search("username", trimmed))
+      .take(20);
 
     return results.filter((u) => u._id !== currentUser._id);
   },
 });
 
-// Update online status
+// Update online status. The Clerk webhook is the single writer for the
+// users table — if no row exists yet, the webhook hasn't landed, so this
+// is a no-op rather than racing to insert a stub user.
 export const updateOnlineStatus = mutation({
   args: { isOnline: v.boolean() },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Unauthorized");
+    const user = await getOptionalUser(ctx);
+    if (!user) return;
 
-    let user = await ctx.db
-      .query("users")
-      .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
-      .unique();
-
-    // Create user if they don't exist yet (webhook might not have fired)
-    if (!user) {
-      // Create minimal user record - webhook will update with full details later
-      const email = (identity as any).email || `user-${identity.subject.slice(0, 8)}@temp.com`;
-      const username = (identity as any).username || `user-${identity.subject.slice(0, 8)}`;
-      
-      const userId = await ctx.db.insert("users", {
-        clerkId: identity.subject,
-        email: email,
-        username: username,
-        firstName: (identity as any).firstName || undefined,
-        lastName: (identity as any).lastName || undefined,
-        imageUrl: (identity as any).pictureUrl || undefined,
-        isOnline: args.isOnline,
-        lastSeen: Date.now(),
-      });
-      
-      // User created, status already set in insert
-      return;
-    }
-
-    // Update existing user's online status
     await ctx.db.patch(user._id, {
       isOnline: args.isOnline,
       lastSeen: Date.now(),
     });
+  },
+});
+
+// Has the Clerk webhook synced this user yet? The client can poll this on
+// first load to know when it's safe to subscribe to user-dependent queries.
+export const isCurrentUserSynced = query({
+  args: {},
+  handler: async (ctx) => {
+    const user = await getOptionalUser(ctx);
+    return user !== null;
+  },
+});
+
+// Update app-side profile fields (status/bio). Name/avatar/email come from
+// Clerk and are kept in sync via the webhook — those should be edited there.
+export const updateProfile = mutation({
+  args: {
+    status: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    const updates: Partial<{ status: string }> = {};
+    if (args.status !== undefined) {
+      // Empty string clears the status.
+      updates.status = args.status.trim().slice(0, 140);
+    }
+    await ctx.db.patch(user._id, updates);
   },
 });

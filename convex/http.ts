@@ -43,9 +43,17 @@ http.route({
         "svix-timestamp": svixTimestamp,
         "svix-signature": svixSignature,
       }) as typeof evt;
-    } catch (err) {
-      console.error("Webhook verification failed:", err);
+    } catch {
       return new Response("Invalid signature", { status: 400 });
+    }
+
+    // Idempotency: ack-and-skip on Clerk retries of an already-handled event.
+    const alreadyProcessed = await ctx.runMutation(
+      internal.webhooks.claimSvixId,
+      { svixId },
+    );
+    if (alreadyProcessed) {
+      return new Response("OK (replay)", { status: 200 });
     }
 
     const eventType = evt.type;

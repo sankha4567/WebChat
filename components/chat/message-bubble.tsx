@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
+import { FunctionReturnType } from "convex/server";
 import { format } from "date-fns";
 import {
   Reply,
@@ -17,19 +18,29 @@ import {
   Pause,
   Download,
   FileIcon,
+  Mic,
 } from "lucide-react";
 import { cn, formatFileSize, formatDuration } from "@/lib/utils";
 import { EmojiPicker } from "./emoji-picker";
+import { ReplyPreviewBody } from "./reply-preview-body";
+
+type Message = NonNullable<
+  FunctionReturnType<typeof api.messages.getMessages>[number]
+>;
+type Reaction = Message["reactions"][number];
 
 interface MessageBubbleProps {
-  message: any;
+  message: Message;
   conversationId: Id<"conversations">;
+  isGroup: boolean;
+  isGroupAdmin: boolean;
   onReply: () => void;
 }
 
 export function MessageBubble({
   message,
-  conversationId,
+  isGroup,
+  isGroupAdmin,
   onReply,
 }: MessageBubbleProps) {
   const [showActions, setShowActions] = useState(false);
@@ -108,7 +119,7 @@ export function MessageBubble({
     return (
       <div className="flex justify-center my-2">
         <span className="px-3 py-1 bg-chat-header/80 rounded-lg text-xs text-chat-text-muted">
-          {message.content}
+          {formatSystemMessage(message)}
         </span>
       </div>
     );
@@ -144,7 +155,7 @@ export function MessageBubble({
             <button
               onClick={() => {
                 setIsEditing(true);
-                setEditContent(message.content);
+                setEditContent(message.content ?? "");
               }}
               className="p-1.5 hover:bg-chat-hover rounded-full"
             >
@@ -189,12 +200,11 @@ export function MessageBubble({
                 : "bg-chat-bubble-incoming/70"
             )}
           >
-            <p className="text-xs font-medium text-primary-400">
-              {message.replyTo.sender?.username}
-            </p>
-            <p className="text-xs text-chat-text-muted truncate">
-              {message.replyTo.content || `[${message.replyTo.type}]`}
-            </p>
+            <ReplyPreviewBody
+              message={message.replyTo}
+              senderLabel={message.replyTo.sender?.username || "Unknown"}
+              size="sm"
+            />
           </div>
         )}
 
@@ -206,8 +216,9 @@ export function MessageBubble({
             message.replyTo && "rounded-t-none"
           )}
         >
-          {/* Sender name for group chats */}
-          {!message.isOwn && message.sender && (
+          {/* Sender name — group chats only; DMs already identify the
+              other party in the chat header. */}
+          {isGroup && !message.isOwn && message.sender && (
             <p className="text-xs font-medium text-primary-400 mb-1">
               {message.sender.firstName || message.sender.username}
             </p>
@@ -277,8 +288,12 @@ export function MessageBubble({
               {/* Voice Message */}
               {message.type === "voice" && (
                 <VoicePlayer
+                  messageId={message._id}
                   url={message.fileUrl}
                   duration={message.voiceDuration || 0}
+                  isOwn={message.isOwn}
+                  playedByRecipient={message.playedByRecipient}
+                  playedByMe={message.playedByMe}
                 />
               )}
             </>
@@ -290,22 +305,14 @@ export function MessageBubble({
               <span className="text-xs text-chat-text-muted">edited</span>
             )}
             <span className="text-xs text-chat-text-muted">{time}</span>
-            {message.isOwn && (
-              <span className="text-primary-400">
-                {message.readBy > 0 ? (
-                  <CheckCheck className="w-4 h-4" />
-                ) : (
-                  <Check className="w-4 h-4" />
-                )}
-              </span>
-            )}
+            {message.isOwn && <ReadTicks message={message} />}
           </div>
         </div>
 
         {/* Reactions */}
         {message.reactions && message.reactions.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-1">
-            {message.reactions.map((reaction: any) => (
+            {message.reactions.map((reaction: Reaction) => (
               <button
                 key={reaction.emoji}
                 onClick={() => handleReaction(reaction.emoji)}
@@ -353,55 +360,269 @@ export function MessageBubble({
           >
             <Reply className="w-4 h-4 text-chat-text-muted" />
           </button>
-          <button
-            onClick={handleDeleteForMe}
-            className="p-1.5 hover:bg-chat-hover rounded-full"
-          >
-            <Trash2 className="w-4 h-4 text-chat-text-muted" />
-          </button>
+          {isGroup && isGroupAdmin ? (
+            // Admins of a group can also remove other members' messages
+            // for everyone — submenu mirrors the own-message delete UI.
+            <div className="relative">
+              <button
+                onClick={() => setShowDeleteMenu(!showDeleteMenu)}
+                className="p-1.5 hover:bg-chat-hover rounded-full"
+              >
+                <Trash2 className="w-4 h-4 text-chat-text-muted" />
+              </button>
+              {showDeleteMenu && (
+                <div className="absolute left-0 top-full mt-1 py-1 bg-chat-header rounded-lg shadow-xl border border-chat-border z-10 min-w-[180px]">
+                  <button
+                    onClick={handleDeleteForMe}
+                    className="w-full px-4 py-2 text-left text-sm text-chat-text-primary hover:bg-chat-hover"
+                  >
+                    Delete for me
+                  </button>
+                  <button
+                    onClick={handleDeleteForEveryone}
+                    className="w-full px-4 py-2 text-left text-sm text-red-400 hover:bg-chat-hover"
+                  >
+                    Delete for everyone
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button
+              onClick={handleDeleteForMe}
+              className="p-1.5 hover:bg-chat-hover rounded-full"
+            >
+              <Trash2 className="w-4 h-4 text-chat-text-muted" />
+            </button>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function VoicePlayer({ url, duration }: { url?: string; duration: number }) {
+// Renders system messages with viewer-relative pronouns:
+//   actor === current user → "You"
+//   target === current user → "you"
+// Falls back to the pre-formatted content string for messages predating
+// the structured-system-message migration (no systemAction set).
+function formatSystemMessage(m: Message): string {
+  if (!m.systemAction) return m.content ?? "";
+
+  const actor = m.isOwn
+    ? "You"
+    : m.sender
+      ? m.sender.firstName && m.sender.lastName
+        ? `${m.sender.firstName} ${m.sender.lastName}`
+        : m.sender.firstName || m.sender.username
+      : "Someone";
+
+  const target = m.systemTargetIsMe ? "you" : (m.systemTargetName ?? "user");
+
+  switch (m.systemAction) {
+    case "group_created":
+      return `${actor} created the group "${m.systemGroupName ?? ""}"`;
+    case "member_added":
+      return `${actor} added ${target}`;
+    case "member_removed":
+      return `${actor} removed ${target}`;
+    case "member_left":
+      return `${actor} left the group`;
+  }
+}
+
+function ReadTicks({ message }: { message: Message }) {
+  // Hide ticks until the server has had a chance to compute recipient state.
+  if (!message.isOwn) return null;
+
+  if (message.readByAll) {
+    return <CheckCheck className="w-4 h-4 text-sky-400" aria-label="Read" />;
+  }
+  if (message.anyRecipientOnline) {
+    return (
+      <CheckCheck
+        className="w-4 h-4 text-chat-text-muted"
+        aria-label="Delivered"
+      />
+    );
+  }
+  return <Check className="w-4 h-4 text-chat-text-muted" aria-label="Sent" />;
+}
+
+const WAVEFORM_BARS = 36;
+
+// Stable, deterministic waveform shape based on the audio URL so a given
+// voice message always renders identically. Replace with real PCM-derived
+// bars when we add Web Audio decoding.
+function generateWaveform(seed: string | undefined, count: number): number[] {
+  let h = 2166136261;
+  if (seed) {
+    for (let i = 0; i < seed.length; i++) {
+      h = (h ^ seed.charCodeAt(i)) >>> 0;
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+  }
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) {
+    h = (Math.imul(h, 1103515245) + 12345) >>> 0;
+    // 25% – 95% bar height — looks like a real waveform without being noisy.
+    out.push(25 + ((h >>> 16) % 71));
+  }
+  return out;
+}
+
+const PLAYBACK_SPEEDS = [1, 1.5, 2] as const;
+
+// MediaRecorder-produced webm files don't include a duration in their
+// metadata, so audio.duration starts as Infinity. The standard fix is to
+// seek to a huge time, which forces the browser to scan to the end and
+// emit a durationchange event with the real value.
+function probeDuration(a: HTMLAudioElement, onResolved: (d: number) => void) {
+  if (Number.isFinite(a.duration) && a.duration > 0) {
+    onResolved(a.duration);
+    return;
+  }
+  const handleChange = () => {
+    if (Number.isFinite(a.duration) && a.duration > 0) {
+      a.removeEventListener("durationchange", handleChange);
+      try {
+        a.currentTime = 0;
+      } catch {
+        // Some browsers throw if seek happens before metadata; safe to ignore.
+      }
+      onResolved(a.duration);
+    }
+  };
+  a.addEventListener("durationchange", handleChange);
+  try {
+    a.currentTime = 1e9;
+  } catch {
+    // Safari may need metadata first — durationchange will still fire later.
+  }
+}
+
+function VoicePlayer({
+  messageId,
+  url,
+  duration,
+  isOwn,
+  playedByRecipient,
+  playedByMe,
+}: {
+  messageId: Id<"messages">;
+  url?: string;
+  duration: number;
+  isOwn: boolean;
+  playedByRecipient: boolean;
+  playedByMe: boolean;
+}) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [audio, setAudio] = useState<HTMLAudioElement | null>(null);
+  const [resolvedDuration, setResolvedDuration] = useState<number | null>(null);
+  const [speedIndex, setSpeedIndex] = useState(0);
+  // Optimistic local flag set the moment the user clicks play, so the dot
+  // turns blue immediately rather than waiting for the markVoiceAsPlayed
+  // mutation to round-trip and the getMessages query to refresh.
+  const [locallyPlayed, setLocallyPlayed] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const reportedPlayRef = useRef(false);
+  // True only while the user has actively triggered playback. Blocks
+  // currentTime updates from probe-seeks (e.g. the duration-probe seeks
+  // to 1e9 and back, which would otherwise look like playback to the UI).
+  const playingRef = useRef(false);
+  const markVoiceAsPlayed = useMutation(api.messages.markVoiceAsPlayed);
+  const bars = useMemo(() => generateWaveform(url, WAVEFORM_BARS), [url]);
+  const speed = PLAYBACK_SPEEDS[speedIndex];
+
+  // Authoritative duration: prefer the audio element's value (more accurate
+  // than the recorder's integer-second timer, which can be 0 for short
+  // messages and is missing entirely on legacy rows).
+  const effectiveDuration =
+    resolvedDuration && resolvedDuration > 0
+      ? resolvedDuration
+      : duration > 0
+        ? duration
+        : 0;
+
+  // Initialize on mount with preload="metadata" so the bubble shows the real
+  // audio length before the user presses play. Same element is reused for
+  // playback so we don't double-fetch.
+  useEffect(() => {
+    if (!url) return;
+    const a = new Audio(url);
+    a.preload = "metadata";
+
+    const onTimeUpdate = () => {
+      // Ignore time updates from internal seeks (duration probe). Only
+      // reflect them in the UI when the user is actually playing back.
+      if (!playingRef.current) return;
+      setCurrentTime(a.currentTime);
+    };
+    const onEnded = () => {
+      playingRef.current = false;
+      setIsPlaying(false);
+      setCurrentTime(0);
+    };
+    const onLoaded = () => probeDuration(a, setResolvedDuration);
+
+    a.addEventListener("timeupdate", onTimeUpdate);
+    a.addEventListener("ended", onEnded);
+    a.addEventListener("loadedmetadata", onLoaded);
+    if (a.readyState >= 1) probeDuration(a, setResolvedDuration);
+
+    audioRef.current = a;
+    return () => {
+      a.pause();
+      a.removeEventListener("timeupdate", onTimeUpdate);
+      a.removeEventListener("ended", onEnded);
+      a.removeEventListener("loadedmetadata", onLoaded);
+      audioRef.current = null;
+    };
+  }, [url]);
+
+  // Keep playbackRate in sync when speed changes mid-message.
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.playbackRate = speed;
+  }, [speed]);
 
   const handlePlayPause = () => {
-    if (!url) return;
-
-    if (!audio) {
-      const newAudio = new Audio(url);
-      newAudio.addEventListener("timeupdate", () => {
-        setCurrentTime(newAudio.currentTime);
-      });
-      newAudio.addEventListener("ended", () => {
-        setIsPlaying(false);
-        setCurrentTime(0);
-      });
-      setAudio(newAudio);
-      newAudio.play();
-      setIsPlaying(true);
+    const a = audioRef.current;
+    if (!a) return;
+    if (isPlaying) {
+      playingRef.current = false;
+      a.pause();
+      setIsPlaying(false);
     } else {
-      if (isPlaying) {
-        audio.pause();
-      } else {
-        audio.play();
+      playingRef.current = true;
+      void a.play();
+      setIsPlaying(true);
+      // Record a "heard" receipt the first time a recipient plays the voice.
+      // Server-side mutation guards against the sender flipping their own
+      // mic, but skip the round-trip entirely when isOwn.
+      if (!isOwn && !reportedPlayRef.current) {
+        reportedPlayRef.current = true;
+        setLocallyPlayed(true);
+        void markVoiceAsPlayed({ messageId });
       }
-      setIsPlaying(!isPlaying);
     }
   };
 
-  const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const cycleSpeed = () => {
+    setSpeedIndex((i) => (i + 1) % PLAYBACK_SPEEDS.length);
+  };
+
+  const progress =
+    effectiveDuration > 0 ? Math.min(currentTime / effectiveDuration, 1) : 0;
+  const playedBars = Math.floor(progress * bars.length);
+  const playheadX = `${progress * 100}%`;
+  const hasStarted = currentTime > 0 || isPlaying;
 
   return (
-    <div className="flex items-center gap-3 min-w-[200px]">
+    <div className="flex items-center gap-3 min-w-[280px] max-w-[340px] py-1">
       <button
         onClick={handlePlayPause}
-        className="w-10 h-10 bg-primary-600 rounded-full flex items-center justify-center flex-shrink-0"
+        className="w-10 h-10 bg-primary-600 hover:bg-primary-700 rounded-full flex items-center justify-center flex-shrink-0 transition-colors"
+        aria-label={isPlaying ? "Pause" : "Play"}
       >
         {isPlaying ? (
           <Pause className="w-5 h-5 text-white" />
@@ -409,17 +630,76 @@ function VoicePlayer({ url, duration }: { url?: string; duration: number }) {
           <Play className="w-5 h-5 text-white ml-0.5" />
         )}
       </button>
-      <div className="flex-1">
-        <div className="h-1.5 bg-black/20 rounded-full overflow-hidden">
+
+      <div className="flex-1 min-w-0">
+        <div className="relative h-7 flex items-center">
+          <div className="flex items-center gap-[2px] w-full h-full">
+            {bars.map((heightPct, i) => (
+              <div
+                key={i}
+                className={cn(
+                  "flex-1 rounded-full transition-colors",
+                  // Played bars stay clearly visible against any bubble color
+                  // (own = green, incoming = dark gray) — white at high alpha
+                  // contrasts on both. Unplayed bars are dimmer but visible.
+                  i < playedBars ? "bg-white/90" : "bg-white/30",
+                )}
+                style={{ height: `${heightPct}%` }}
+              />
+            ))}
+          </div>
+          {/* Playhead color reflects "has this been heard":
+              - Sender side: blue once recipient(s) played the message.
+              - Recipient side: blue once the user has played it themselves
+                (server-confirmed via playedByMe, with locallyPlayed for
+                immediate feedback before the mutation round-trips).
+              Gray in all other cases. */}
           <div
-            className="h-full bg-primary-400 transition-all"
-            style={{ width: `${progress}%` }}
+            className={cn(
+              "absolute w-3 h-3 rounded-full shadow-md ring-2 pointer-events-none transition-[left,background-color] duration-100",
+              (isOwn
+                ? playedByRecipient
+                : playedByMe || locallyPlayed)
+                ? "bg-sky-400 ring-sky-400/30"
+                : "bg-white/60 ring-white/20",
+            )}
+            style={{
+              left: playheadX,
+              top: "50%",
+              transform: "translate(-50%, -50%)",
+            }}
           />
         </div>
-        <p className="text-xs text-chat-text-muted mt-1">
-          {formatDuration(isPlaying ? currentTime : duration)}
-        </p>
+        <div className="flex items-center gap-1.5 mt-1">
+          <Mic
+            className={cn(
+              "w-3 h-3 flex-shrink-0 transition-colors",
+              // Sender's bubble: mic turns sky-blue once every recipient
+              // has played the voice — the WhatsApp "heard" indicator.
+              isOwn && playedByRecipient
+                ? "text-sky-400"
+                : "text-chat-text-muted",
+            )}
+          />
+          <span className="text-xs text-chat-text-muted tabular-nums">
+            {formatDuration(hasStarted ? currentTime : effectiveDuration)}
+          </span>
+        </div>
       </div>
+
+      <button
+        onClick={cycleSpeed}
+        className={cn(
+          "px-2.5 py-1 rounded-full text-[11px] font-semibold tabular-nums transition-colors flex-shrink-0",
+          // Highlight when not at 1× so users notice an active speed boost.
+          speed === 1
+            ? "bg-black/30 text-white/80 hover:bg-black/40"
+            : "bg-sky-500/30 text-sky-200 hover:bg-sky-500/40",
+        )}
+        aria-label={`Playback speed ${speed}x`}
+      >
+        {speed}×
+      </button>
     </div>
   );
 }

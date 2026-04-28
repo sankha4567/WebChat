@@ -5,12 +5,12 @@ import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
 import { useUser, UserButton } from "@clerk/nextjs";
-import { formatDistanceToNow } from "date-fns";
-import { Search, MessageSquarePlus, Users } from "lucide-react";
-import { cn, getInitials } from "@/lib/utils";
+import { Search, MessageSquarePlus, Users, UserCog } from "lucide-react";
+import { cn, formatChatTimestamp, getInitials } from "@/lib/utils";
 import { SearchDialog } from "./search-dialog";
 import { NewChatDialog } from "./new-chat-dialog";
 import { CreateGroupDialog } from "./create-group-dialog";
+import { ProfileDialog } from "./profile-dialog";
 
 interface SidebarProps {
   selectedConversationId: Id<"conversations"> | null;
@@ -22,20 +22,41 @@ export function Sidebar({
   onSelectConversation,
 }: SidebarProps) {
   const { user } = useUser();
+  const me = useQuery(api.users.getCurrentUser);
   const conversations = useQuery(api.conversations.getConversations) || [];
   const [searchOpen, setSearchOpen] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   return (
     <div className="flex flex-col h-full bg-chat-sidebar">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 bg-chat-header">
         <div className="flex items-center gap-3">
-          <UserButton afterSignOutUrl="/sign-in" />
-          <span className="text-chat-text-primary font-medium">
-            {user?.firstName || user?.username || "Chat"}
-          </span>
+          <UserButton afterSignOutUrl="/sign-in">
+            <UserButton.MenuItems>
+              <UserButton.Action
+                label="Profile"
+                labelIcon={<UserCog className="w-4 h-4" />}
+                onClick={() => setProfileOpen(true)}
+              />
+            </UserButton.MenuItems>
+          </UserButton>
+          <button
+            onClick={() => setProfileOpen(true)}
+            className="flex flex-col items-start hover:bg-chat-hover px-2 py-1 -ml-2 rounded transition-colors text-left max-w-[160px]"
+            aria-label="Open your profile"
+          >
+            <span className="text-chat-text-primary font-medium truncate">
+              {user?.firstName || user?.username || "Chat"}
+            </span>
+            {me?.status?.trim() && (
+              <span className="text-xs text-chat-text-muted truncate w-full">
+                {me.status}
+              </span>
+            )}
+          </button>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -93,19 +114,30 @@ export function Sidebar({
             const isOnline =
               !conversation.isGroup && conversation.otherUser?.isOnline;
 
-            const lastMessageText = conversation.lastMessage
-              ? conversation.lastMessage.deletedForEveryone
-                ? "🚫 This message was deleted"
-                : conversation.lastMessage.type === "image"
-                  ? "📷 Photo"
-                  : conversation.lastMessage.type === "file"
-                    ? "📎 File"
-                    : conversation.lastMessage.type === "voice"
-                      ? "🎤 Voice message"
-                      : conversation.lastMessage.type === "system"
-                        ? conversation.lastMessage.content
-                        : conversation.lastMessage.content
-              : "No messages yet";
+            const last = conversation.lastMessage;
+            let lastMessageText = "No messages yet";
+            if (last) {
+              if (last.deletedForEveryone) {
+                lastMessageText = "🚫 This message was deleted";
+              } else if (last.type === "reaction") {
+                const reactor =
+                  last.sender?._id === me?._id
+                    ? "You"
+                    : last.sender?.firstName || last.sender?.username || "Someone";
+                const target = last.content ? `: "${last.content}"` : "";
+                lastMessageText = `${reactor} reacted ${last.reactionEmoji ?? ""} to${target}`;
+              } else if (last.type === "image") {
+                lastMessageText = "📷 Photo";
+              } else if (last.type === "file") {
+                lastMessageText = "📎 File";
+              } else if (last.type === "voice") {
+                lastMessageText = "🎤 Voice message";
+              } else if (last.type === "system") {
+                lastMessageText = last.content ?? "";
+              } else {
+                lastMessageText = last.content ?? "";
+              }
+            }
 
             const typingText =
               conversation.typingUsers && conversation.typingUsers.length > 0
@@ -149,10 +181,7 @@ export function Sidebar({
                     </span>
                     {conversation.lastMessage && (
                       <span className="text-xs text-chat-text-muted flex-shrink-0 ml-2">
-                        {formatDistanceToNow(
-                          new Date(conversation.lastMessage.createdAt),
-                          { addSuffix: false }
-                        )}
+                        {formatChatTimestamp(conversation.lastMessage.createdAt)}
                       </span>
                     )}
                   </div>
@@ -194,6 +223,7 @@ export function Sidebar({
         onOpenChange={setCreateGroupOpen}
         onSelectConversation={onSelectConversation}
       />
+      <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
     </div>
   );
 }
